@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "fast-s3-url"
-version = "0.1.0"
+version = "0.1.1"
 description = "An S3 signed URL generator, faster than boto3's, for generating lots of signed URLs quickly."
 authors = ["André Carvalho <afecarvalho@gmail.com>"]
 readme = "README.md"
