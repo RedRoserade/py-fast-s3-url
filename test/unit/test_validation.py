@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from fast_s3_url import FastS3UrlSigner
+from fast_s3_url import FastS3UrlSigner, Credentials
 
 
 @pytest.mark.parametrize(
@@ -17,8 +17,10 @@ def test_validates_parameters(invalid_object_key: str):
     # Arrange
     sig = FastS3UrlSigner(
         bucket_endpoint_url="http://localhost:9000/my-bucket/",
-        access_key_id="minioadmin",
-        secret_access_key="minioadmin",
+        credentials=Credentials(
+            access_key="minioadmin",
+            secret_key="minioadmin",
+        ),
     )
 
     # Act / Assert

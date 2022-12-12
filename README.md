@@ -64,13 +64,25 @@ The following example assumes you have a [MinIO](https://min.io/) instance runni
 Note that you shouldn't hardcode credentials, this is merely for illustration purposes.
 
 ```python
+from fast_s3_signer import FastS3UrlSigner, Credentials
+
 signer = FastS3UrlSigner(
     bucket_endpoint_url="http://localhost:9000/my-bucket/",
     aws_region="us-east-1",
-    access_key_id="minioadmin",
-    secret_access_key="minioadmin",
+    credentials=Credentials(
+        access_key="minioadmin",
+        secret_key="minioadmin",
+    ),
 )
 ```
+
+### :warning: Note on instances created from boto3 and aiobotocore
+
+The boto3 and aiobotocore clients may, when they are configured with an STS Security Token, refresh their credentials when generating signed URLs. When a `FastS3UrlSigner` is created with these clients, their credentials are refreshed so that the signer has access to the current credentials, **but it won't refresh them after it's created**. The signer doesn't even keep a reference to the client you use to create it!
+
+This means that if your aiobotocore/boto3 clients happen to have expiring tokens in them, URLs created by `FastS3UrlSigner` may suddently stop working. Therefore, the best way to use a `FastS3UrlSigner` created from a client is to create it in a function-local scope, use it, and then have it be destroyed by GC when you no longer need it.
+
+If you create your signer instances with non-expiring credentials, you can safely disregard this warning.
 
 ## Local development
 

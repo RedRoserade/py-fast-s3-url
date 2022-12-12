@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from datetime import datetime, timezone
 import hashlib
 import hmac
@@ -7,18 +8,18 @@ from urllib.parse import quote, urlparse, urlunparse
 
 from typing import TYPE_CHECKING, List, Optional
 
+from fast_s3_url.credentials import Credentials, CredentialsWithToken
+from fast_s3_url.util import (
+    get_credentials_from_aiobotocore_client,
+    get_credentials_from_boto3_client,
+)
+
 
 if TYPE_CHECKING:
     from types_aiobotocore_s3 import S3Client as AioBotocoreS3Client
     from mypy_boto3_s3.client import S3Client as Boto3S3Client
 
 __all__ = ["FastS3UrlSigner"]
-
-
-class _Credentials:
-    access_key: str
-    secret_key: str
-    token: Optional[str]
 
 
 class FastS3UrlSigner:
@@ -32,19 +33,16 @@ class FastS3UrlSigner:
         self,
         *,
         bucket_endpoint_url: str,
-        access_key_id: str,
-        secret_access_key: str,
+        credentials: Credentials,
         aws_region: Optional[str] = None,
-        session_token: Optional[str] = None,
     ) -> None:
         """
         Create an instance of this object with the specified parameters.
 
         :param bucket_endpoint_url: The URL to a bucket. Can be virtual-style, e.g.: 'https://my-bucket.s3.amazonaws.com/' or path-style, e.g.: 'https://s3.amazonaws.com/my-bucket/'.
-        :param access_key_id: The Access Key ID. Usually mapped to the `AWS_ACCESS_KEY_ID` environment variable.
-        :param secret_access_key: The Secret Access Key. Usually mapped to the `AWS_SECRET_ACCESS_KEY` environment variable.
         :param aws_region: The AWS region that will be used to generate URLs with. Defaults to 'us-east-1'.
-        :param session_token: An STS session token. Usually mapped to the `AWS_SESSION_TOKEN` environment variable.
+        :param credentials: Credentials to the S3 bucket.
+        :param session_token:
         """
 
         # Get the components from the bucket's endpoint URL.
@@ -57,9 +55,7 @@ class FastS3UrlSigner:
         self.bucket_host = parsed_bucket_url.netloc
 
         self.region = aws_region or "us-east-1"
-        self.secret_key = secret_access_key
-        self.access_key = access_key_id
-        self.session_token = session_token
+        self.credentials = credentials
 
     @classmethod
     def from_boto3_client(
@@ -69,6 +65,14 @@ class FastS3UrlSigner:
     ):
         """
         Create an instance from a boto3 S3 client, using its credentials.
+
+        This method may, depending on how your client is configured, refresh its credentials.
+        Bear in mind that the official clients may refresh their credentials when calling methods on them,
+        but the created signer won't. This means that if the credentials are temporary (e.g., STS tokens),
+        the generated URLs may suddently become invalid.
+
+        For the sake of caution, these instances should, therefore, be short-lived
+        (that is, create, use, and destroy).
         """
 
         # Generate a dummy URL to see how the client does it with the current configuration,
@@ -81,14 +85,12 @@ class FastS3UrlSigner:
         bucket_endpoint_url = dummy_url[0 : dummy_url.index(dummy_key, 0)]
 
         # Get the client's current credentials.
-        credentials: _Credentials = client._request_signer._credentials.get_frozen_credentials()  # type: ignore
+        credentials = get_credentials_from_boto3_client(client)
 
         return cls(
             aws_region=client.meta.region_name,
             bucket_endpoint_url=bucket_endpoint_url,
-            access_key_id=credentials.access_key,
-            secret_access_key=credentials.secret_key,
-            session_token=credentials.token,
+            credentials=credentials,
         )
 
     @classmethod
@@ -99,6 +101,14 @@ class FastS3UrlSigner:
     ):
         """
         Create an instance from an aiobotocore S3 client, using its credentials.
+
+        This method may, depending on how your client is configured, refresh its credentials.
+        Bear in mind that the official clients may refresh their credentials when calling methods on them,
+        but the created signer won't. This means that if the credentials are temporary (e.g., STS tokens),
+        the generated URLs may suddently become invalid.
+
+        For the sake of caution, these instances should, therefore, be short-lived
+        (that is, create, use, and destroy).
         """
 
         # Generate a dummy URL to see how the client does it with the current configuration,
@@ -111,14 +121,12 @@ class FastS3UrlSigner:
         bucket_endpoint_url = dummy_url[0 : dummy_url.index(dummy_key, 0)]
 
         # Get the client's current credentials.
-        credentials: _Credentials = await client._request_signer._credentials.get_frozen_credentials()  # type: ignore
+        credentials = await get_credentials_from_aiobotocore_client(client)
 
         return cls(
             aws_region=client.meta.region_name,
             bucket_endpoint_url=bucket_endpoint_url,
-            access_key_id=credentials.access_key,
-            secret_access_key=credentials.secret_key,
-            session_token=credentials.token,
+            credentials=credentials,
         )
 
     def generate_presigned_get_object_urls(
@@ -146,7 +154,7 @@ class FastS3UrlSigner:
         amz_date = now.strftime("%Y%m%dT%H%M%SZ")
 
         signing_key = _derive_signing_key(
-            self.secret_key.encode(), datestamp, self.region, "s3"
+            self.credentials.secret_key.encode(), datestamp, self.region, "s3"
         )
 
         canonical_headers = f"host:{self.bucket_host}\n"
@@ -156,7 +164,9 @@ class FastS3UrlSigner:
 
         credential_scope = f"{datestamp}/{self.region}/s3/aws4_request"
 
-        encoded_credential = quote(f"{self.access_key}/{credential_scope}", safe="~")
+        encoded_credential = quote(
+            f"{self.credentials.access_key}/{credential_scope}", safe="~"
+        )
 
         canonical_querystring_template_parts = [
             f"X-Amz-Algorithm={algorithm}",
@@ -166,9 +176,9 @@ class FastS3UrlSigner:
             f"X-Amz-SignedHeaders={signed_headers}",
         ]
 
-        if self.session_token:
+        if isinstance(self.credentials, CredentialsWithToken):
             canonical_querystring_template_parts.append(
-                f"X-Amz-Security-Token={quote(self.session_token, safe='~')}"
+                f"X-Amz-Security-Token={quote(self.credentials.session_token, safe='~')}"
             )
 
         # The query string parameters must be sorted by their name.
@@ -207,7 +217,7 @@ class FastS3UrlSigner:
                 )
             )
 
-            signature = hmac_hex(signing_key, string_to_sign.encode())
+            signature = _hmac_hex(signing_key, string_to_sign.encode())
 
             qs_with_signature = (
                 f"{canonical_querystring_template}&X-Amz-Signature={signature}"
@@ -221,16 +231,16 @@ class FastS3UrlSigner:
 
 
 def _derive_signing_key(key: bytes, datestamp: str, region: str, service: str) -> bytes:
-    k_date = hmac_bytes(b"AWS4" + key, datestamp.encode("utf-8"))
-    k_region = hmac_bytes(k_date, region.encode("utf-8"))
-    k_service = hmac_bytes(k_region, service.encode("utf-8"))
+    k_date = _hmac_bytes(b"AWS4" + key, datestamp.encode("utf-8"))
+    k_region = _hmac_bytes(k_date, region.encode("utf-8"))
+    k_service = _hmac_bytes(k_region, service.encode("utf-8"))
 
-    return hmac_bytes(k_service, b"aws4_request")
+    return _hmac_bytes(k_service, b"aws4_request")
 
 
-def hmac_bytes(key: bytes, data: bytes) -> bytes:
+def _hmac_bytes(key: bytes, data: bytes) -> bytes:
     return hmac.new(key, data, hashlib.sha256).digest()
 
 
-def hmac_hex(key: bytes, data: bytes) -> str:
+def _hmac_hex(key: bytes, data: bytes) -> str:
     return hmac.new(key, data, hashlib.sha256).hexdigest()
