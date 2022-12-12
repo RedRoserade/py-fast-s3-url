@@ -168,7 +168,7 @@ class FastS3UrlSigner:
 
         if self.session_token:
             canonical_querystring_template_parts.append(
-                f"X-Amz-Security-Token={quote(self.session_token)}"
+                f"X-Amz-Security-Token={quote(self.session_token, safe='~')}"
             )
 
         # The query string parameters must be sorted by their name.
